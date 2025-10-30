@@ -1,0 +1,17 @@
+[Unit]
+Description=SRT to HLS (FFmpeg)
+After=network.target
+
+
+[Service]
+User=www-data
+WorkingDirectory=/root
+Environment=DOMAIN=%DOMAIN% DUCKDNS_TOKEN=%DUCKDNS_TOKEN% SRT_PORT=%SRT_PORT% HLS_ROOT=%HLS_ROOT% HLS_PLAYLIST=%HLS_PLAYLIST% SRT_LATENCY=%SRT_LATENCY% PKT_SIZE=%PKT_SIZE% USE_GPU=%USE_GPU%
+ExecStart=/usr/local/bin/ffmpeg-start.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+
+[Install]
+WantedBy=multi-user.target
