@@ -1,17 +1,19 @@
+# sportsabo-srt-hls-setup (Internet-ready, hardware encoder selection, DuckDNS-free)
+
+This GitHub repo version installs SRT → HLS streaming, lets you select CPU/AMD/NVIDIA encoding, opens Internet ports, and shows OBS/HLS URLs.
+
+---
+
+## `install.sh`
+
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-
 if [[ $EUID -ne 0 ]]; then
-echo "Run as root: sudo ./install.sh"
-exit 1
+  echo "Run as root: sudo ./install.sh"
+  exit 1
 fi
-
-
-# Prompt for DuckDNS info
-read -p "Enter your DuckDNS domain (e.g., sportsabo.duckdns.org): " DOMAIN
-read -p "Enter your DuckDNS token: " DUCKDNS_TOKEN
-
 
 # Default settings
 SRT_PORT=9000
@@ -19,89 +21,140 @@ HLS_ROOT=/var/www/sportsabo
 HLS_PLAYLIST=index.m3u8
 SRT_LATENCY=800
 PKT_SIZE=1316
-USE_GPU=false # true if AMD GPU + hevc_amf
+DOMAIN=localhost
 
-
-export DOMAIN DUCKDNS_TOKEN SRT_PORT HLS_ROOT HLS_PLAYLIST SRT_LATENCY PKT_SIZE USE_GPU
-
+export SRT_PORT HLS_ROOT HLS_PLAYLIST SRT_LATENCY PKT_SIZE DOMAIN
 
 # Install dependencies
 apt update
-apt install -y ffmpeg nginx certbot python3-certbot-nginx curl
-
+apt install -y ffmpeg nginx curl
 
 # Create HLS folder
 mkdir -p "$HLS_ROOT"
 chown -R www-data:www-data "$HLS_ROOT"
 chmod -R 755 "$HLS_ROOT"
 
-
-# Copy example index
-cp -n www/index.html "$HLS_ROOT/index.html"
-
+# Create placeholder index.html
+cat > "$HLS_ROOT/index.html" <<'EOF'
+<!doctype html>
+<html>
+  <head><title>sportsabo HLS</title></head>
+  <body>
+    <h1>Live Stream</h1>
+    <p>Open <a href="index.m3u8">index.m3u8</a> to play the stream.</p>
+  </body>
+</html>
+EOF
 
 # Nginx site config
 cat > /etc/nginx/sites-available/sportsabo <<'NGCONF'
 server {
-listen 80;
-server_name _;
+    listen 80;
+    server_name _;
 
+    root /var/www/sportsabo;
+    index index.html;
 
-root /var/www/sportsabo;
-index index.html;
-
-
-location / {
-types {
-application/vnd.apple.mpegurl m3u8;
-video/mp2t ts;
-}
-add_header Cache-Control no-cache;
-add_header Access-Control-Allow-Origin *;
-}
+    location / {
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/mp2t ts;
+        }
+        add_header Cache-Control no-cache;
+        add_header Access-Control-Allow-Origin *;
+    }
 }
 NGCONF
-
 
 ln -sf /etc/nginx/sites-available/sportsabo /etc/nginx/sites-enabled/sportsabo
 rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 
+# Select encoder
+echo ""
+echo "Select hardware encoder for streaming:"
+echo "1) CPU (libx264)"
+echo "2) AMD HEVC (hevc_amf)"
+echo "3) NVIDIA H.264/H.265 (nvenc)"
+read -rp "Enter number [1-3]: " ENC_CHOICE
 
-# Install scripts
-install -m 700 duck.sh /usr/local/bin/duck.sh
+case $ENC_CHOICE in
+  1) ENCODER="libx264" ;;
+  2) ENCODER="hevc_amf" ;;
+  3) ENCODER="h264_nvenc" ;;
+  *) echo "Invalid choice, defaulting to libx264"; ENCODER="libx264" ;;
+esac
+export ENCODER
+echo "Selected encoder: $ENCODER"
+
+# Install FFmpeg start script
+cat > ffmpeg-start.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRT_IN="srt://:${SRT_PORT}?mode=listener&latency=${SRT_LATENCY}&pkt_size=${PKT_SIZE}"
+
+if [ "$ENCODER" = "libx264" ]; then
+    ffmpeg -hide_banner -y -i "$SRT_IN" \
+      -c:v libx264 -preset veryfast -crf 23 \
+      -c:a aac -b:a 128k \
+      -f hls -hls_time 2 -hls_list_size 6 -hls_flags delete_segments+program_date_time+append_list \
+      -hls_segment_type mpegts -hls_playlist_type event "${HLS_ROOT}/${HLS_PLAYLIST}"
+else
+    ffmpeg -hide_banner -y -i "$SRT_IN" \
+      -c:v "$ENCODER" -b:v 8M \
+      -c:a aac -b:a 128k \
+      -f hls -hls_time 2 -hls_list_size 6 -hls_flags delete_segments+program_date_time+append_list \
+      -hls_segment_type mpegts -hls_playlist_type event "${HLS_ROOT}/${HLS_PLAYLIST}"
+fi
+EOF
+
+chmod +x ffmpeg-start.sh
 install -m 755 ffmpeg-start.sh /usr/local/bin/ffmpeg-start.sh
 
+# Register systemd unit
+cat > srt-to-hls.service <<'EOF'
+[Unit]
+Description=SRT to HLS (FFmpeg)
+After=network.target
 
-# Register systemd units
+[Service]
+User=www-data
+WorkingDirectory=/root
+Environment=SRT_PORT=%SRT_PORT% HLS_ROOT=%HLS_ROOT% HLS_PLAYLIST=%HLS_PLAYLIST% SRT_LATENCY=%SRT_LATENCY% PKT_SIZE=%PKT_SIZE% ENCODER=%ENCODER%
+ExecStart=/usr/local/bin/ffmpeg-start.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 install -m 644 srt-to-hls.service /etc/systemd/system/srt-to-hls.service
-install -m 644 duckdns.service /etc/systemd/system/duckdns.service
-install -m 644 duckdns.timer /etc/systemd/system/duckdns.timer
-
-
 systemctl daemon-reload
-systemctl enable --now duckdns.timer
 systemctl enable --now srt-to-hls.service
 
-
-# Attempt SSL
-if curl -s --head "http://$DOMAIN/" | head -n 1 | grep -q "200"; then
-echo "Attempting to obtain Let's Encrypt certificate for $DOMAIN"
-certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" || echo "certbot failed"
-systemctl reload nginx || true
-else
-echo "Domain does not resolve yet. You can run certbot later."
+# Open ports in UFW
+if command -v ufw &>/dev/null; then
+    echo "🔥 Opening ports 9000 (SRT) and 80 (HLS) in UFW..."
+    ufw allow 9000/tcp
+    ufw allow 9000/udp
+    ufw allow 80/tcp
+    ufw reload
 fi
 
+# Show URLs
+PUBLIC_IP=$(curl -s ifconfig.me || echo "<your-public-ip>")
 
-echo "Installation completed. Your public HLS stream will be at http://$DOMAIN/${HLS_PLAYLIST}"
 echo ""
 echo "🎬 Setup complete! Use the following URLs:"
 echo ""
 echo "1️⃣ OBS SRT URL (push stream):"
-echo "   srt://${DOMAIN}:9000?mode=caller&latency=800&pkt_size=1316"
+echo "   srt://${PUBLIC_IP}:9000?mode=caller&latency=800&pkt_size=1316"
 echo ""
 echo "2️⃣ Public HLS URL (watch stream):"
-echo "   http://${DOMAIN}/index.m3u8"
+echo "   http://${PUBLIC_IP}/index.m3u8"
 echo ""
-echo "You can now start streaming from OBS, and open the HLS URL in VLC or Safari."
+echo "Open the HLS URL in VLC, Safari, or any HLS-compatible player."
+```
