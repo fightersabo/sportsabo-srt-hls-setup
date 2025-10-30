@@ -95,3 +95,13 @@ fi
 
 
 echo "Installation completed. Your public HLS stream will be at http://$DOMAIN/${HLS_PLAYLIST}"
+echo ""
+echo "🎬 Setup complete! Use the following URLs:"
+echo ""
+echo "1️⃣ OBS SRT URL (push stream):"
+echo "   srt://${DOMAIN}:9000?mode=caller&latency=800&pkt_size=1316"
+echo ""
+echo "2️⃣ Public HLS URL (watch stream):"
+echo "   http://${DOMAIN}/index.m3u8"
+echo ""
+echo "You can now start streaming from OBS, and open the HLS URL in VLC or Safari."
