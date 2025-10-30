@@ -1,4 +1,4 @@
 # sportsabo-srt-hls-setup
 
 
-d
+bash <(curl -s https://raw.githubusercontent.com/fightersabo/sportsabo-srt-hls-setup/main/install.sh)
